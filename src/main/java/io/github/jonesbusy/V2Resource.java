@@ -4,6 +4,7 @@ import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HEAD;
 import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
@@ -18,7 +19,9 @@ import org.jboss.resteasy.reactive.RestQuery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.net.URI;
 import java.nio.file.Files;
+import java.util.UUID;
 
 
 @Path("/v2")
@@ -75,17 +78,45 @@ public class V2Resource {
     /**
      * Monolithic upload
      */
+    @PUT
+    @Path("{name}/blobs/uploads/{sessionId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    @Consumes(MediaType.APPLICATION_OCTET_STREAM)
+    public Response end4b(@RestPath("name") String name, @RestQuery("sessionId") String sessionId, @RestQuery("digest") String digest, byte[] body) {
+        try {
+            LOG.info("Uploading for session: {}", sessionId);
+            OCILayout ociLayout = OCILayout.Builder.builder().defaults(java.nio.file.Path.of(name)).build();
+            LayoutRef layoutRef = LayoutRef.parse("%s@%s".formatted(ociLayout.getPath(), digest));
+            Layer layer = ociLayout.pushBlob(layoutRef, body);
+            LOG.info("Pushed blob: {}", layer.getDigest());
+            return Response.created(URI.create("/v2/%s/blobs/%s".formatted(name, layer.getDigest()))).build();
+        }
+        catch (Exception e) {
+            LOG.warn("Failed to create upload", e);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(e.getMessage()).build();
+        }
+    }
+
+    /**
+     * Monolithic upload
+     */
     @POST
     @Path("{name}/blobs/uploads")
     @Produces(MediaType.APPLICATION_JSON)
     @Consumes(MediaType.APPLICATION_OCTET_STREAM)
     public Response end4b(@RestPath("name") String name, @RestQuery("digest") String digest, byte[] body) {
+
+        // Return location header if digest is null
+        if (digest == null) {
+            return Response.accepted().header(Const.LOCATION_HEADER, "/v2/%s/blobs/uploads/%s".formatted(name, UUID.randomUUID().toString())).build();
+        }
+
         try {
             OCILayout ociLayout = OCILayout.Builder.builder().defaults(java.nio.file.Path.of(name)).build();
             LayoutRef layoutRef = LayoutRef.parse("%s@%s".formatted(ociLayout.getPath(), digest));
             Layer layer = ociLayout.pushBlob(layoutRef, body);
             LOG.info("Pushed blob: {}", layer.getDigest());
-            return Response.ok(JsonUtils.toJson(layer)).build();
+            return Response.created(URI.create("/v2/%s/blobs/%s".formatted(name, layer.getDigest()))).build();
         }
         catch (Exception e) {
             LOG.warn("Failed to create upload", e);
