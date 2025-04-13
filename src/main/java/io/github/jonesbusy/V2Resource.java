@@ -2,6 +2,7 @@ package io.github.jonesbusy;
 
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HEAD;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
@@ -10,6 +11,7 @@ import jakarta.ws.rs.core.Response;
 import land.oras.Layer;
 import land.oras.LayoutRef;
 import land.oras.OCILayout;
+import land.oras.utils.Const;
 import land.oras.utils.JsonUtils;
 import org.jboss.resteasy.reactive.RestPath;
 import org.jboss.resteasy.reactive.RestQuery;
@@ -40,11 +42,29 @@ public class V2Resource {
     @GET
     @Path("{name}/blobs/{digest}")
     @Produces(MediaType.APPLICATION_OCTET_STREAM)
-    public Response end2(@RestPath("name") String name, @RestPath String digest) {
+    public Response end2Get(@RestPath("name") String name, @RestPath String digest) {
         try {
             OCILayout ociLayout = OCILayout.Builder.builder().defaults(java.nio.file.Path.of(name)).build();
             LayoutRef layoutRef = LayoutRef.parse("%s@%s".formatted(ociLayout.getPath(), digest));
             return Response.ok(ociLayout.getBlob(layoutRef)).build();
+        }
+        catch (Exception e) {
+            LOG.warn("Failed to get blob", e);
+            return Response.status(Response.Status.NOT_FOUND).entity(e.getMessage()).build();
+        }
+    }
+
+    /**
+     * end-2
+     */
+    @HEAD
+    @Path("{name}/blobs/{digest}")
+    public Response end2Head(@RestPath("name") String name, @RestPath String digest) {
+        try {
+            OCILayout ociLayout = OCILayout.Builder.builder().defaults(java.nio.file.Path.of(name)).build();
+            LayoutRef layoutRef = LayoutRef.parse("%s@%s".formatted(ociLayout.getPath(), digest));
+            byte[] blob = ociLayout.getBlob(layoutRef);
+            return Response.ok().header(Const.CONTENT_LENGTH_HEADER, blob.length).build();
         }
         catch (Exception e) {
             LOG.warn("Failed to get blob", e);
@@ -64,6 +84,7 @@ public class V2Resource {
             OCILayout ociLayout = OCILayout.Builder.builder().defaults(java.nio.file.Path.of(name)).build();
             LayoutRef layoutRef = LayoutRef.parse("%s@%s".formatted(ociLayout.getPath(), digest));
             Layer layer = ociLayout.pushBlob(layoutRef, body);
+            LOG.info("Pushed blob: {}", layer.getDigest());
             return Response.ok(JsonUtils.toJson(layer)).build();
         }
         catch (Exception e) {
