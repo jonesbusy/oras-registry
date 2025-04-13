@@ -16,6 +16,8 @@ import org.jboss.resteasy.reactive.RestQuery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.file.Files;
+
 
 @Path("/v2")
 public class V2Resource {
@@ -66,6 +68,24 @@ public class V2Resource {
         }
         catch (Exception e) {
             LOG.warn("Failed to create upload", e);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(e.getMessage()).build();
+        }
+    }
+
+    @GET
+    @Path("{name}/tags/list")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response end8a(@RestPath("name") String name) {
+        try {
+            if (!Files.isDirectory(java.nio.file.Path.of(name))) {
+                return Response.status(Response.Status.NOT_FOUND).build();
+            }
+            OCILayout ociLayout = OCILayout.Builder.builder().defaults(java.nio.file.Path.of(name)).build();
+            LayoutRef layoutRef = LayoutRef.parse(name);
+            return Response.ok(JsonUtils.toJson(ociLayout.getTags(layoutRef))).build();
+        }
+        catch (Exception e) {
+            LOG.warn("Failed to get tags", e);
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(e.getMessage()).build();
         }
     }

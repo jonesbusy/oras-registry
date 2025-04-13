@@ -15,7 +15,7 @@
         <quarkus.platform.version>3.21.2</quarkus.platform.version>
         <skipITs>true</skipITs>
         <surefire-plugin.version>3.5.2</surefire-plugin.version>
-        <oras.version>0.2.4</oras.version>
+        <oras.version>0.2.5-SNAPSHOT</oras.version>
     </properties>
 
     <dependencyManagement>
