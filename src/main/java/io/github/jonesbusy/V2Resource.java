@@ -82,7 +82,7 @@ public class V2Resource {
     @Path("{name}/blobs/uploads/{sessionId}")
     @Produces(MediaType.APPLICATION_JSON)
     @Consumes(MediaType.APPLICATION_OCTET_STREAM)
-    public Response end4b(@RestPath("name") String name, @RestQuery("sessionId") String sessionId, @RestQuery("digest") String digest, byte[] body) {
+    public Response end4b(@RestPath("name") String name, @RestPath("sessionId") String sessionId, @RestQuery("digest") String digest, byte[] body) {
         try {
             LOG.info("Uploading for session: {}", sessionId);
             OCILayout ociLayout = OCILayout.Builder.builder().defaults(java.nio.file.Path.of(name)).build();
