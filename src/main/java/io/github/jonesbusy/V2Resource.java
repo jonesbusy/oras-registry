@@ -10,11 +10,14 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.UUID;
 import land.oras.Layer;
 import land.oras.LayoutRef;
+import land.oras.Manifest;
 import land.oras.OCILayout;
+import land.oras.exception.OrasException;
 import land.oras.utils.Const;
 import land.oras.utils.JsonUtils;
 import org.jboss.resteasy.reactive.RestPath;
@@ -105,6 +108,78 @@ public class V2Resource {
                     .build();
         } catch (Exception e) {
             LOG.warn("Failed to create upload", e);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity(e.getMessage())
+                    .build();
+        }
+    }
+
+    @HEAD
+    @Path("{name}/manifests/{reference}")
+    public Response headend3(@RestPath("name") String name, @RestPath("reference") String digest) {
+        try {
+            LOG.info("Checking manifest with ref: {}", digest);
+            OCILayout ociLayout = OCILayout.Builder.builder()
+                    .defaults(java.nio.file.Path.of(name))
+                    .build();
+            LayoutRef layoutRef = LayoutRef.parse("%s@%s".formatted(ociLayout.getPath(), digest));
+            ociLayout.getManifest(layoutRef);
+            return Response.status(200).build();
+        }
+        // Not found
+        catch (OrasException e) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        catch (Exception e) {
+            LOG.warn("Failed to upload manifet", e);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity(e.getMessage())
+                    .build();
+        }
+    }
+
+    @GET
+    @Path("{name}/manifests/{reference}")
+    @Produces(Const.DEFAULT_MANIFEST_MEDIA_TYPE)
+    public Response getend3(@RestPath("name") String name, @RestPath("reference") String digest) {
+        try {
+            LOG.info("Checking manifest with ref: {}", digest);
+            OCILayout ociLayout = OCILayout.Builder.builder()
+                    .defaults(java.nio.file.Path.of(name))
+                    .build();
+            LayoutRef layoutRef = LayoutRef.parse("%s@%s".formatted(ociLayout.getPath(), digest));
+            Manifest manifest = ociLayout.getManifest(layoutRef);
+            LOG.info("Found manifest: {}", manifest.getJson());
+            return Response.ok(manifest.getJson()).build();
+        }
+        // Not found
+        catch (OrasException e) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        catch (Exception e) {
+            LOG.warn("Failed to upload manifet", e);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity(e.getMessage())
+                    .build();
+        }
+    }
+
+    @PUT
+    @Path("{name}/manifests/{reference}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response end7(@RestPath("name") String name, @RestPath("reference") String digest, byte[] body) {
+        try {
+            Manifest manifest = Manifest.fromJson(new String(body, StandardCharsets.UTF_8));
+            LOG.info("Uploading manifest: {}", manifest.getJson());
+            OCILayout ociLayout = OCILayout.Builder.builder()
+                    .defaults(java.nio.file.Path.of(name))
+                    .build();
+            LayoutRef layoutRef = LayoutRef.parse("%s@%s".formatted(ociLayout.getPath(), digest));
+            ociLayout.pushManifest(layoutRef, manifest);
+            LOG.info("Pushed manifest: {}", manifest.getJson());
+            return Response.status(201).build();
+        } catch (Exception e) {
+            LOG.warn("Failed to upload manifet", e);
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
                     .entity(e.getMessage())
                     .build();
