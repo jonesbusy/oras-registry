@@ -28,3 +28,8 @@ jobs:
         run: mvn --batch-mode --update-snapshots verify
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Maven build native
+        run: mvn --batch-mode --update-snapshots verify -Dnative
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
