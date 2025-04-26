@@ -129,9 +129,8 @@ public class V2Resource {
         // Not found
         catch (OrasException e) {
             return Response.status(Response.Status.NOT_FOUND).build();
-        }
-        catch (Exception e) {
-            LOG.warn("Failed to upload manifet", e);
+        } catch (Exception e) {
+            LOG.warn("Failed to check manifest", e);
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
                     .entity(e.getMessage())
                     .build();
@@ -143,7 +142,7 @@ public class V2Resource {
     @Produces(Const.DEFAULT_MANIFEST_MEDIA_TYPE)
     public Response getend3(@RestPath("name") String name, @RestPath("reference") String digest) {
         try {
-            LOG.info("Checking manifest with ref: {}", digest);
+            LOG.info("Getting manifest with ref: {}", digest);
             OCILayout ociLayout = OCILayout.Builder.builder()
                     .defaults(java.nio.file.Path.of(name))
                     .build();
@@ -155,8 +154,7 @@ public class V2Resource {
         // Not found
         catch (OrasException e) {
             return Response.status(Response.Status.NOT_FOUND).build();
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             LOG.warn("Failed to upload manifet", e);
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
                     .entity(e.getMessage())

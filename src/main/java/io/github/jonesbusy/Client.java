@@ -1,7 +1,6 @@
 package io.github.jonesbusy;
 
-import jakarta.inject.Inject;
-import jakarta.inject.Named;
+import io.quarkiverse.oras.runtime.OrasRegistry;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
@@ -15,16 +14,13 @@ import land.oras.utils.Const;
 @Path("/client")
 public class Client {
 
-    @Inject
-    @Named("docker")
+    @OrasRegistry("docker")
     Registry registry;
 
-    @Inject
-    @Named("localhost")
+    @OrasRegistry("localhost")
     Registry localhost;
 
-    @Inject
-    @Named("localhost2")
+    @OrasRegistry("localhost2")
     Registry localhost2;
 
     @GET
