@@ -1,5 +1,7 @@
 package io.github.jonesbusy;
 
+import io.quarkiverse.oras.runtime.OCILayouts;
+import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HEAD;
@@ -25,9 +27,18 @@ import org.jboss.resteasy.reactive.RestQuery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * OCI partial spec
+ */
 @Path("/v2")
 public class V2Resource {
 
+    @Inject
+    OCILayouts ociLayouts;
+
+    /**
+     * Logger
+     */
     private static final Logger LOG = LoggerFactory.getLogger(V2Resource.class);
 
     /**
@@ -48,11 +59,8 @@ public class V2Resource {
     @Produces(MediaType.APPLICATION_OCTET_STREAM)
     public Response end2Get(@RestPath("name") String name, @RestPath String digest) {
         try {
-            OCILayout ociLayout = OCILayout.Builder.builder()
-                    .defaults(java.nio.file.Path.of(name))
-                    .build();
-            LayoutRef layoutRef = LayoutRef.parse("%s@%s".formatted(ociLayout.getPath(), digest));
-            return Response.ok(ociLayout.getBlob(layoutRef)).build();
+            OCILayout ociLayout = ociLayouts.getLayout(name);
+            return Response.ok(ociLayout.getBlob(LayoutRef.of(ociLayout).withDigest(digest))).build();
         } catch (Exception e) {
             LOG.warn("Failed to get blob", e);
             return Response.status(Response.Status.NOT_FOUND)
@@ -68,11 +76,8 @@ public class V2Resource {
     @Path("{name}/blobs/{digest}")
     public Response end2Head(@RestPath("name") String name, @RestPath String digest) {
         try {
-            OCILayout ociLayout = OCILayout.Builder.builder()
-                    .defaults(java.nio.file.Path.of(name))
-                    .build();
-            LayoutRef layoutRef = LayoutRef.parse("%s@%s".formatted(ociLayout.getPath(), digest));
-            byte[] blob = ociLayout.getBlob(layoutRef);
+            OCILayout ociLayout = ociLayouts.getLayout(name);
+            byte[] blob = ociLayout.getBlob(LayoutRef.of(ociLayout).withDigest(digest));
             return Response.ok()
                     .header(Const.CONTENT_LENGTH_HEADER, blob.length)
                     .build();
@@ -98,11 +103,8 @@ public class V2Resource {
             byte[] body) {
         try {
             LOG.info("Uploading for session: {}", sessionId);
-            OCILayout ociLayout = OCILayout.Builder.builder()
-                    .defaults(java.nio.file.Path.of(name))
-                    .build();
-            LayoutRef layoutRef = LayoutRef.parse("%s@%s".formatted(ociLayout.getPath(), digest));
-            Layer layer = ociLayout.pushBlob(layoutRef, body);
+            OCILayout ociLayout = ociLayouts.getLayout(name);
+            Layer layer = ociLayout.pushBlob(LayoutRef.of(ociLayout).withDigest(digest), body);
             LOG.info("Pushed blob: {}", layer.getDigest());
             return Response.created(URI.create("/v2/%s/blobs/%s".formatted(name, layer.getDigest())))
                     .build();
@@ -119,11 +121,8 @@ public class V2Resource {
     public Response headend3(@RestPath("name") String name, @RestPath("reference") String digest) {
         try {
             LOG.info("Checking manifest with ref: {}", digest);
-            OCILayout ociLayout = OCILayout.Builder.builder()
-                    .defaults(java.nio.file.Path.of(name))
-                    .build();
-            LayoutRef layoutRef = LayoutRef.parse("%s@%s".formatted(ociLayout.getPath(), digest));
-            ociLayout.getManifest(layoutRef);
+            OCILayout ociLayout = ociLayouts.getLayout(name);
+            ociLayout.getManifest(LayoutRef.of(ociLayout).withDigest(digest));
             return Response.status(200).build();
         }
         // Not found
@@ -143,11 +142,8 @@ public class V2Resource {
     public Response getend3(@RestPath("name") String name, @RestPath("reference") String digest) {
         try {
             LOG.info("Getting manifest with ref: {}", digest);
-            OCILayout ociLayout = OCILayout.Builder.builder()
-                    .defaults(java.nio.file.Path.of(name))
-                    .build();
-            LayoutRef layoutRef = LayoutRef.parse("%s@%s".formatted(ociLayout.getPath(), digest));
-            Manifest manifest = ociLayout.getManifest(layoutRef);
+            OCILayout ociLayout = ociLayouts.getLayout(name);
+            Manifest manifest = ociLayout.getManifest(LayoutRef.of(ociLayout).withDigest(digest));
             LOG.info("Found manifest: {}", manifest.getJson());
             return Response.ok(manifest.getJson()).build();
         }
@@ -169,11 +165,8 @@ public class V2Resource {
         try {
             Manifest manifest = Manifest.fromJson(new String(body, StandardCharsets.UTF_8));
             LOG.info("Uploading manifest: {}", manifest.getJson());
-            OCILayout ociLayout = OCILayout.Builder.builder()
-                    .defaults(java.nio.file.Path.of(name))
-                    .build();
-            LayoutRef layoutRef = LayoutRef.parse("%s@%s".formatted(ociLayout.getPath(), digest));
-            ociLayout.pushManifest(layoutRef, manifest);
+            OCILayout ociLayout = ociLayouts.getLayout(name);
+            ociLayout.pushManifest(LayoutRef.of(ociLayout).withDigest(digest), manifest);
             LOG.info("Pushed manifest: {}", manifest.getJson());
             return Response.status(201).build();
         } catch (Exception e) {
@@ -204,11 +197,8 @@ public class V2Resource {
         }
 
         try {
-            OCILayout ociLayout = OCILayout.Builder.builder()
-                    .defaults(java.nio.file.Path.of(name))
-                    .build();
-            LayoutRef layoutRef = LayoutRef.parse("%s@%s".formatted(ociLayout.getPath(), digest));
-            Layer layer = ociLayout.pushBlob(layoutRef, body);
+            OCILayout ociLayout = ociLayouts.getLayout(name);
+            Layer layer = ociLayout.pushBlob(LayoutRef.of(ociLayout).withDigest(digest), body);
             LOG.info("Pushed blob: {}", layer.getDigest());
             return Response.created(URI.create("/v2/%s/blobs/%s".formatted(name, layer.getDigest())))
                     .build();
@@ -228,11 +218,8 @@ public class V2Resource {
             if (!Files.isDirectory(java.nio.file.Path.of(name))) {
                 return Response.status(Response.Status.NOT_FOUND).build();
             }
-            OCILayout ociLayout = OCILayout.Builder.builder()
-                    .defaults(java.nio.file.Path.of(name))
-                    .build();
-            LayoutRef layoutRef = LayoutRef.parse(name);
-            return Response.ok(JsonUtils.toJson(ociLayout.getTags(layoutRef))).build();
+            OCILayout ociLayout = ociLayouts.getLayout(name);
+            return Response.ok(JsonUtils.toJson(ociLayout.getTags(LayoutRef.of(ociLayout)))).build();
         } catch (Exception e) {
             LOG.warn("Failed to get tags", e);
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
