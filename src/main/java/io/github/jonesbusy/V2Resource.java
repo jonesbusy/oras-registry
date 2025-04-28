@@ -60,7 +60,8 @@ public class V2Resource {
     public Response end2Get(@RestPath("name") String name, @RestPath String digest) {
         try {
             OCILayout ociLayout = ociLayouts.getLayout(name);
-            return Response.ok(ociLayout.getBlob(LayoutRef.of(ociLayout).withDigest(digest))).build();
+            return Response.ok(ociLayout.getBlob(LayoutRef.of(ociLayout).withDigest(digest)))
+                    .build();
         } catch (Exception e) {
             LOG.warn("Failed to get blob", e);
             return Response.status(Response.Status.NOT_FOUND)
@@ -219,7 +220,8 @@ public class V2Resource {
                 return Response.status(Response.Status.NOT_FOUND).build();
             }
             OCILayout ociLayout = ociLayouts.getLayout(name);
-            return Response.ok(JsonUtils.toJson(ociLayout.getTags(LayoutRef.of(ociLayout)))).build();
+            return Response.ok(JsonUtils.toJson(ociLayout.getTags(LayoutRef.of(ociLayout))))
+                    .build();
         } catch (Exception e) {
             LOG.warn("Failed to get tags", e);
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
