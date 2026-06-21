@@ -3,6 +3,7 @@ package io.github.jonesbusy;
 import io.quarkiverse.oras.runtime.OCILayouts;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HEAD;
 import jakarta.ws.rs.PATCH;
@@ -12,28 +13,37 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
+import land.oras.ArtifactType;
+import land.oras.Index;
 import land.oras.Layer;
 import land.oras.LayoutRef;
 import land.oras.Manifest;
 import land.oras.OCILayout;
+import land.oras.Referrers;
+import land.oras.Repositories;
+import land.oras.Tags;
 import land.oras.exception.OrasException;
 import land.oras.utils.Const;
 import land.oras.utils.JsonUtils;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.resteasy.reactive.RestPath;
 import org.jboss.resteasy.reactive.RestQuery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Partial OCI Distribution Spec v2 implementation.
- * Supports docker push/pull with monolithic and chunked (PATCH→PUT) blob uploads.
+ * OCI Distribution Spec v1.1 — partial implementation for docker push/pull and core registry ops.
  */
 @Path("/v2")
 public class V2Resource {
@@ -41,12 +51,18 @@ public class V2Resource {
     @Inject
     OCILayouts ociLayouts;
 
+    @ConfigProperty(name = "quarkus.oras.layouts.path")
+    String layoutsPath;
+
     private static final Logger LOG = LoggerFactory.getLogger(V2Resource.class);
 
     // In-flight blob data keyed by upload session ID (PATCH → PUT flow)
     private final ConcurrentHashMap<String, byte[]> uploadSessions = new ConcurrentHashMap<>();
 
-    /** end-1: API version check */
+    // -------------------------------------------------------------------------
+    // end-1: API version check
+    // -------------------------------------------------------------------------
+
     @GET
     @Produces(MediaType.TEXT_PLAIN)
     public Response end1() {
@@ -55,7 +71,10 @@ public class V2Resource {
                 .build();
     }
 
-    /** end-2: Pull blob */
+    // -------------------------------------------------------------------------
+    // end-2: Blob pull
+    // -------------------------------------------------------------------------
+
     @GET
     @Path("{name}/blobs/{digest}")
     @Produces(MediaType.APPLICATION_OCTET_STREAM)
@@ -68,12 +87,14 @@ public class V2Resource {
                     .header(Const.CONTENT_LENGTH_HEADER, blob.length)
                     .build();
         } catch (Exception e) {
-            LOG.warn("Blob not found: {}/{}", name, digest);
-            return Response.status(Response.Status.NOT_FOUND).build();
+            LOG.debug("Blob not found: {}/{}", name, digest);
+            return Response.status(404)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(OciError.of("BLOB_UNKNOWN", "blob unknown to registry"))
+                    .build();
         }
     }
 
-    /** end-2: Check blob exists */
     @HEAD
     @Path("{name}/blobs/{digest}")
     public Response blobHead(@RestPath("name") String name, @RestPath String digest) {
@@ -86,16 +107,44 @@ public class V2Resource {
                     .build();
         } catch (Exception e) {
             LOG.debug("Blob not found (HEAD): {}/{}", name, digest);
-            return Response.status(Response.Status.NOT_FOUND).build();
+            return Response.status(404).build();
         }
     }
 
-    /** end-4a: Initiate blob upload session */
+    // -------------------------------------------------------------------------
+    // end-10: Delete blob
+    // -------------------------------------------------------------------------
+
+    @DELETE
+    @Path("{name}/blobs/{digest}")
+    public Response blobDelete(@RestPath("name") String name, @RestPath String digest) {
+        try {
+            OCILayout ociLayout = ociLayouts.getLayout(name);
+            // Verify existence first
+            ociLayout.getBlob(LayoutRef.of(ociLayout).withDigest(digest));
+            String hex = digest.substring(digest.indexOf(':') + 1);
+            Files.deleteIfExists(ociLayout.getPath().resolve("blobs/sha256/" + hex));
+            return Response.accepted().build();
+        } catch (OrasException e) {
+            return Response.status(404)
+                    .entity(OciError.of("BLOB_UNKNOWN", "blob unknown to registry"))
+                    .build();
+        } catch (Exception e) {
+            LOG.warn("Failed to delete blob: {}/{}", name, digest, e);
+            return Response.status(500)
+                    .entity(OciError.of("INTERNAL_SERVER_ERROR", e.getMessage()))
+                    .build();
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // end-4a/4b/5/6: Blob upload (POST → PATCH → PUT)
+    // -------------------------------------------------------------------------
+
     @POST
     @Path("{name}/blobs/uploads")
-    @Consumes(MediaType.APPLICATION_OCTET_STREAM)
     public Response blobUploadPost(@RestPath("name") String name, @RestQuery("digest") String digest, byte[] body) {
-        // Monolithic POST: client sent body + digest in one shot
+        // Monolithic POST: client sent body + digest together
         if (digest != null && body != null && body.length > 0) {
             try {
                 OCILayout ociLayout = ociLayouts.getLayout(name);
@@ -104,13 +153,13 @@ public class V2Resource {
                         .header("Docker-Content-Digest", layer.getDigest())
                         .build();
             } catch (Exception e) {
-                LOG.warn("Failed monolithic blob push", e);
-                return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
-                        .entity(e.getMessage())
+                LOG.warn("Monolithic blob push failed", e);
+                return Response.status(500)
+                        .entity(OciError.of("BLOB_UPLOAD_INVALID", e.getMessage()))
                         .build();
             }
         }
-        // Normal flow: return session URL; client will PATCH data then PUT to finalize
+        // Normal: return session URL; Docker will PATCH data then PUT to finalize
         String sessionId = UUID.randomUUID().toString();
         return Response.accepted()
                 .header(Const.LOCATION_HEADER, "/v2/%s/blobs/uploads/%s".formatted(name, sessionId))
@@ -119,7 +168,24 @@ public class V2Resource {
                 .build();
     }
 
-    /** end-4b (partial): Receive blob chunk — stores data for finalization via PUT */
+    /** end-5: Query upload session status */
+    @GET
+    @Path("{name}/blobs/uploads/{sessionId}")
+    public Response blobUploadStatus(@RestPath("name") String name, @RestPath("sessionId") String sessionId) {
+        byte[] data = uploadSessions.get(sessionId);
+        if (data == null) {
+            return Response.status(404)
+                    .entity(OciError.of("BLOB_UPLOAD_UNKNOWN", "upload session not found"))
+                    .build();
+        }
+        return Response.noContent()
+                .header(Const.LOCATION_HEADER, "/v2/%s/blobs/uploads/%s".formatted(name, sessionId))
+                .header("Range", data.length > 0 ? "0-" + (data.length - 1) : "0-0")
+                .header("Docker-Upload-UUID", sessionId)
+                .build();
+    }
+
+    /** end-4b (partial): Receive blob chunk */
     @PATCH
     @Path("{name}/blobs/uploads/{sessionId}")
     @Consumes(MediaType.APPLICATION_OCTET_STREAM)
@@ -135,7 +201,7 @@ public class V2Resource {
                 .build();
     }
 
-    /** end-4b: Finalize blob upload — uses session data from PATCH when body is absent */
+    /** end-6: Finalize blob upload */
     @PUT
     @Path("{name}/blobs/uploads/{sessionId}")
     @Consumes(MediaType.APPLICATION_OCTET_STREAM)
@@ -158,13 +224,24 @@ public class V2Resource {
                     .build();
         } catch (Exception e) {
             LOG.warn("Failed to finalize blob upload", e);
-            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
-                    .entity(e.getMessage())
+            return Response.status(500)
+                    .entity(OciError.of("BLOB_UPLOAD_INVALID", e.getMessage()))
                     .build();
         }
     }
 
-    /** end-3: Check manifest exists */
+    /** end-14: Cancel blob upload */
+    @DELETE
+    @Path("{name}/blobs/uploads/{sessionId}")
+    public Response blobUploadDelete(@RestPath("name") String name, @RestPath("sessionId") String sessionId) {
+        uploadSessions.remove(sessionId);
+        return Response.noContent().build();
+    }
+
+    // -------------------------------------------------------------------------
+    // end-3: Manifest pull
+    // -------------------------------------------------------------------------
+
     @HEAD
     @Path("{name}/manifests/{reference}")
     public Response manifestHead(@RestPath("name") String name, @RestPath("reference") String reference) {
@@ -178,16 +255,18 @@ public class V2Resource {
                     .header("Docker-Content-Digest", sha256Hex(bytes))
                     .build();
         } catch (OrasException e) {
-            return Response.status(Response.Status.NOT_FOUND).build();
+            return Response.status(404)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(OciError.of("MANIFEST_UNKNOWN", "manifest unknown"))
+                    .build();
         } catch (Exception e) {
             LOG.warn("Failed to check manifest: {}/{}", name, reference, e);
-            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
-                    .entity(e.getMessage())
+            return Response.status(500)
+                    .entity(OciError.of("INTERNAL_SERVER_ERROR", e.getMessage()))
                     .build();
         }
     }
 
-    /** end-3: Pull manifest */
     @GET
     @Path("{name}/manifests/{reference}")
     @Produces(MediaType.WILDCARD)
@@ -201,16 +280,23 @@ public class V2Resource {
                     .header("Docker-Content-Digest", sha256Hex(bytes))
                     .build();
         } catch (OrasException e) {
-            return Response.status(Response.Status.NOT_FOUND).build();
+            return Response.status(404)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(OciError.of("MANIFEST_UNKNOWN", "manifest unknown"))
+                    .build();
         } catch (Exception e) {
             LOG.warn("Failed to get manifest: {}/{}", name, reference, e);
-            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
-                    .entity(e.getMessage())
+            return Response.status(500)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(OciError.of("INTERNAL_SERVER_ERROR", e.getMessage()))
                     .build();
         }
     }
 
-    /** end-7: Push manifest */
+    // -------------------------------------------------------------------------
+    // end-7: Push manifest
+    // -------------------------------------------------------------------------
+
     @PUT
     @Path("{name}/manifests/{reference}")
     public Response manifestPut(@RestPath("name") String name, @RestPath("reference") String reference, byte[] body) {
@@ -227,26 +313,159 @@ public class V2Resource {
                     .build();
         } catch (Exception e) {
             LOG.warn("Failed to push manifest: {}/{}", name, reference, e);
-            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
-                    .entity(e.getMessage())
+            return Response.status(500)
+                    .entity(OciError.of("MANIFEST_INVALID", e.getMessage()))
                     .build();
         }
     }
 
-    /** end-8a: List tags */
+    // -------------------------------------------------------------------------
+    // end-9: Delete manifest
+    // -------------------------------------------------------------------------
+
+    @DELETE
+    @Path("{name}/manifests/{reference}")
+    public Response manifestDelete(@RestPath("name") String name, @RestPath("reference") String reference) {
+        try {
+            OCILayout ociLayout = ociLayouts.getLayout(name);
+            Manifest manifest = ociLayout.getManifest(layoutRef(ociLayout, reference));
+            String manifestDigest = sha256Hex(manifest.getJson().getBytes(StandardCharsets.UTF_8));
+
+            java.nio.file.Path indexPath = ociLayout.getPath().resolve("index.json");
+            Index index = Index.fromPath(indexPath);
+            index.getManifests().stream()
+                    .filter(d -> manifestDigest.equals(d.getDigest()))
+                    .findFirst()
+                    .ifPresent(d -> {
+                        try {
+                            Files.writeString(
+                                    indexPath, index.withRemovedDescriptor(d).toJson(), StandardCharsets.UTF_8);
+                        } catch (IOException ex) {
+                            throw new RuntimeException(ex);
+                        }
+                    });
+
+            String hex = manifestDigest.substring(manifestDigest.indexOf(':') + 1);
+            Files.deleteIfExists(ociLayout.getPath().resolve("blobs/sha256/" + hex));
+            return Response.accepted().build();
+        } catch (OrasException e) {
+            return Response.status(404)
+                    .entity(OciError.of("MANIFEST_UNKNOWN", "manifest unknown"))
+                    .build();
+        } catch (Exception e) {
+            LOG.warn("Failed to delete manifest: {}/{}", name, reference, e);
+            return Response.status(500)
+                    .entity(OciError.of("INTERNAL_SERVER_ERROR", e.getMessage()))
+                    .build();
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // end-8: List tags (with pagination)
+    // -------------------------------------------------------------------------
+
     @GET
     @Path("{name}/tags/list")
     @Produces(MediaType.APPLICATION_JSON)
-    public Response tagsList(@RestPath("name") String name) {
+    public Response tagsList(@RestPath("name") String name, @RestQuery("n") Integer n, @RestQuery("last") String last) {
         try {
             OCILayout ociLayout = ociLayouts.getLayout(name);
-            return Response.ok(JsonUtils.toJson(ociLayout.getTags(LayoutRef.of(ociLayout))))
-                    .build();
+            Tags tags = (n != null)
+                    ? ociLayout.getTags(LayoutRef.of(ociLayout), n, last)
+                    : ociLayout.getTags(LayoutRef.of(ociLayout));
+
+            Response.ResponseBuilder rb = Response.ok(JsonUtils.toJson(tags));
+            // Add RFC 5988 Link header when there is a next page
+            if (tags.last() != null && !tags.last().isEmpty()) {
+                String link = "</v2/%s/tags/list?n=%d&last=%s>; rel=\"next\"".formatted(name, n, tags.last());
+                rb.header("Link", link);
+            }
+            return rb.build();
         } catch (Exception e) {
             LOG.warn("Failed to list tags: {}", name, e);
-            return Response.status(Response.Status.NOT_FOUND).build();
+            return Response.status(404)
+                    .entity(OciError.of("NAME_UNKNOWN", "repository name not known to registry"))
+                    .build();
         }
     }
+
+    // -------------------------------------------------------------------------
+    // end-12: Referrers (OCI 1.1)
+    // -------------------------------------------------------------------------
+
+    @GET
+    @Path("{name}/referrers/{digest}")
+    @Produces("application/vnd.oci.image.index.v1+json")
+    public Response referrers(
+            @RestPath("name") String name,
+            @RestPath("digest") String digest,
+            @RestQuery("artifactType") String artifactType) {
+        try {
+            OCILayout ociLayout = ociLayouts.getLayout(name);
+            ArtifactType type = artifactType != null ? ArtifactType.from(artifactType) : null;
+            Referrers referrers = ociLayout.getReferrers(LayoutRef.of(ociLayout).withDigest(digest), type);
+            Response.ResponseBuilder rb = Response.ok(referrers.toJson());
+            if (artifactType != null) {
+                rb.header("OCI-Filters-Applied", "artifactType");
+            }
+            return rb.build();
+        } catch (Exception e) {
+            // Spec requires empty index (not 404) when there are no referrers
+            LOG.debug("No referrers for {}/{}: {}", name, digest, e.getMessage());
+            String emptyIndex =
+                    "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.index.v1+json\",\"manifests\":[]}";
+            return Response.ok(emptyIndex).build();
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Catalog (_catalog)
+    // -------------------------------------------------------------------------
+
+    @GET
+    @Path("_catalog")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response catalog(@RestQuery("n") Integer n, @RestQuery("last") String last) {
+        try {
+            java.nio.file.Path base = java.nio.file.Path.of(layoutsPath);
+            if (!Files.isDirectory(base)) {
+                return Response.ok(JsonUtils.toJson(new Repositories(List.of())))
+                        .build();
+            }
+            List<String> repos;
+            try (var stream = Files.list(base)) {
+                repos = stream.filter(Files::isDirectory)
+                        .map(p -> p.getFileName().toString())
+                        .filter(r -> !r.startsWith("."))
+                        .sorted()
+                        .collect(Collectors.toList());
+            }
+            // Cursor-based pagination
+            if (last != null) {
+                int idx = repos.indexOf(last);
+                repos = idx >= 0 ? repos.subList(idx + 1, repos.size()) : repos;
+            }
+            String nextLast = null;
+            if (n != null && n > 0 && repos.size() > n) {
+                repos = repos.subList(0, n);
+                nextLast = repos.get(repos.size() - 1);
+            }
+            Response.ResponseBuilder rb = Response.ok(JsonUtils.toJson(new Repositories(repos)));
+            if (nextLast != null) {
+                rb.header("Link", "</v2/_catalog?n=%d&last=%s>; rel=\"next\"".formatted(n, nextLast));
+            }
+            return rb.build();
+        } catch (Exception e) {
+            LOG.warn("Failed to list catalog", e);
+            return Response.status(500)
+                    .entity(OciError.of("INTERNAL_SERVER_ERROR", e.getMessage()))
+                    .build();
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
 
     private LayoutRef layoutRef(OCILayout ociLayout, String reference) {
         return reference.startsWith("sha256:")
