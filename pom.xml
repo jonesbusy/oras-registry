@@ -31,9 +31,14 @@
       <dependency>
         <groupId>tools.jackson</groupId>
         <artifactId>jackson-bom</artifactId>
-        <version>3.1.4</version>
+        <version>3.2.0</version>
         <type>pom</type>
         <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-annotations</artifactId>
+        <version>2.22</version>
       </dependency>
     </dependencies>
   </dependencyManagement>
@@ -42,7 +47,7 @@
     <dependency>
       <groupId>io.quarkiverse.oras</groupId>
       <artifactId>quarkus-oras</artifactId>
-      <version>0.4.5</version>
+      <version>0.5.0</version>
     </dependency>
     <dependency>
       <groupId>io.quarkus</groupId>
