@@ -6,6 +6,7 @@ import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HEAD;
+import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.PATCH;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.PUT;
@@ -148,6 +149,7 @@ public class V2Resource {
         if (digest != null && body != null && body.length > 0) {
             try {
                 OCILayout ociLayout = ociLayouts.getLayout(name);
+                ensureLayout(ociLayout);
                 Layer layer = ociLayout.pushBlob(LayoutRef.of(ociLayout).withDigest(digest), body);
                 return Response.created(URI.create("/v2/%s/blobs/%s".formatted(name, layer.getDigest())))
                         .header("Docker-Content-Digest", layer.getDigest())
@@ -216,6 +218,7 @@ public class V2Resource {
                 data = new byte[0];
             }
             OCILayout ociLayout = ociLayouts.getLayout(name);
+            ensureLayout(ociLayout);
             Layer layer = ociLayout.pushBlob(LayoutRef.of(ociLayout).withDigest(digest), data);
             uploadSessions.remove(sessionId);
             LOG.info("Pushed blob: {}/{}", name, layer.getDigest());
@@ -247,10 +250,10 @@ public class V2Resource {
     public Response manifestHead(@RestPath("name") String name, @RestPath("reference") String reference) {
         try {
             OCILayout ociLayout = ociLayouts.getLayout(name);
-            Manifest manifest = ociLayout.getManifest(layoutRef(ociLayout, reference));
-            byte[] bytes = manifest.getJson().getBytes(StandardCharsets.UTF_8);
+            String json = resolveManifestJson(ociLayout, reference);
+            byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
             return Response.ok()
-                    .header("Content-Type", manifest.getMediaType())
+                    .header("Content-Type", resolveContentType(json))
                     .header(Const.CONTENT_LENGTH_HEADER, bytes.length)
                     .header("Docker-Content-Digest", sha256Hex(bytes))
                     .build();
@@ -262,6 +265,7 @@ public class V2Resource {
         } catch (Exception e) {
             LOG.warn("Failed to check manifest: {}/{}", name, reference, e);
             return Response.status(500)
+                    .type(MediaType.APPLICATION_JSON)
                     .entity(OciError.of("INTERNAL_SERVER_ERROR", e.getMessage()))
                     .build();
         }
@@ -273,10 +277,10 @@ public class V2Resource {
     public Response manifestGet(@RestPath("name") String name, @RestPath("reference") String reference) {
         try {
             OCILayout ociLayout = ociLayouts.getLayout(name);
-            Manifest manifest = ociLayout.getManifest(layoutRef(ociLayout, reference));
-            byte[] bytes = manifest.getJson().getBytes(StandardCharsets.UTF_8);
-            return Response.ok(manifest.getJson())
-                    .header("Content-Type", manifest.getMediaType())
+            String json = resolveManifestJson(ociLayout, reference);
+            byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
+            return Response.ok(json)
+                    .header("Content-Type", resolveContentType(json))
                     .header("Docker-Content-Digest", sha256Hex(bytes))
                     .build();
         } catch (OrasException e) {
@@ -294,19 +298,31 @@ public class V2Resource {
     }
 
     // -------------------------------------------------------------------------
-    // end-7: Push manifest
+    // end-7: Push manifest or index
     // -------------------------------------------------------------------------
 
     @PUT
     @Path("{name}/manifests/{reference}")
-    public Response manifestPut(@RestPath("name") String name, @RestPath("reference") String reference, byte[] body) {
+    public Response manifestPut(
+            @RestPath("name") String name,
+            @RestPath("reference") String reference,
+            @HeaderParam("Content-Type") String contentType,
+            byte[] body) {
         try {
-            Manifest manifest = Manifest.fromJson(new String(body, StandardCharsets.UTF_8));
+            String bodyJson = new String(body, StandardCharsets.UTF_8);
             OCILayout ociLayout = ociLayouts.getLayout(name);
-            Manifest pushed = ociLayout.pushManifest(layoutRef(ociLayout, reference), manifest);
-            byte[] bytes = pushed.getJson().getBytes(StandardCharsets.UTF_8);
-            String digest = sha256Hex(bytes);
-            LOG.info("Pushed manifest: {}/{} digest={}", name, reference, digest);
+            ensureLayout(ociLayout);
+            LayoutRef ref = layoutRef(ociLayout, reference);
+            if (isIndexType(contentType, bodyJson)) {
+                ociLayout.pushIndex(ref, Index.fromJson(bodyJson));
+                LOG.info("Pushed index: {}/{}", name, reference);
+            } else {
+                ociLayout.pushManifest(ref, Manifest.fromJson(bodyJson));
+                LOG.info("Pushed manifest: {}/{}", name, reference);
+            }
+            // Use the original body bytes — digest must match what the client sent
+            byte[] pushedBytes = bodyJson.getBytes(StandardCharsets.UTF_8);
+            String digest = sha256Hex(pushedBytes);
             return Response.status(201)
                     .header("Docker-Content-Digest", digest)
                     .header("Location", "/v2/%s/manifests/%s".formatted(name, digest))
@@ -328,8 +344,8 @@ public class V2Resource {
     public Response manifestDelete(@RestPath("name") String name, @RestPath("reference") String reference) {
         try {
             OCILayout ociLayout = ociLayouts.getLayout(name);
-            Manifest manifest = ociLayout.getManifest(layoutRef(ociLayout, reference));
-            String manifestDigest = sha256Hex(manifest.getJson().getBytes(StandardCharsets.UTF_8));
+            String manifestJson = resolveManifestJson(ociLayout, reference);
+            String manifestDigest = sha256Hex(manifestJson.getBytes(StandardCharsets.UTF_8));
 
             java.nio.file.Path indexPath = ociLayout.getPath().resolve("index.json");
             Index index = Index.fromPath(indexPath);
@@ -466,6 +482,108 @@ public class V2Resource {
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
+
+    /**
+     * Returns the raw JSON for a manifest or index stored at the given reference (tag or digest).
+     * Reads the blob file directly instead of relying on SDK getJson() methods, which return null
+     * when objects are constructed from disk rather than via fromJson().
+     */
+    private String resolveManifestJson(OCILayout ociLayout, String reference) {
+        try {
+            String digest;
+            if (reference.startsWith("sha256:")) {
+                digest = reference;
+            } else {
+                java.nio.file.Path indexPath = ociLayout.getPath().resolve("index.json");
+                if (!Files.exists(indexPath)) {
+                    throw new OrasException("manifest unknown: " + reference);
+                }
+                Index topIndex = Index.fromPath(indexPath);
+                String resolved = topIndex.getManifests().stream()
+                        .filter(d -> d.getAnnotations() != null
+                                && reference.equals(d.getAnnotations().get("org.opencontainers.image.ref.name")))
+                        .map(d -> d.getDigest())
+                        .findFirst()
+                        .orElse(null);
+                if (resolved == null) {
+                    throw new OrasException("manifest unknown: " + reference);
+                }
+                digest = resolved;
+            }
+            String hex = digest.substring(digest.indexOf(':') + 1);
+            java.nio.file.Path blobPath = ociLayout.getPath().resolve("blobs/sha256/" + hex);
+            if (!Files.exists(blobPath)) {
+                throw new OrasException("manifest not found: " + digest);
+            }
+            return Files.readString(blobPath, StandardCharsets.UTF_8);
+        } catch (OrasException e) {
+            throw e;
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to read manifest", e);
+        }
+    }
+
+    /**
+     * Ensures the full OCI layout skeleton exists before any push.
+     * OCILayout$Builder.defaults() only sets the path field and creates the directory;
+     * it does NOT write oci-layout or index.json. pushManifest/pushIndex call
+     * Index.fromPath("index.json") and fail with NoSuchFileException on a fresh layout.
+     */
+    private void ensureLayout(OCILayout ociLayout) {
+        try {
+            java.nio.file.Path root = ociLayout.getPath();
+            Files.createDirectories(root.resolve("blobs/sha256"));
+            java.nio.file.Path ociLayoutFile = root.resolve("oci-layout");
+            if (!Files.exists(ociLayoutFile)) {
+                Files.writeString(ociLayoutFile, "{\"imageLayoutVersion\":\"1.0.0\"}", StandardCharsets.UTF_8);
+            }
+            java.nio.file.Path indexFile = root.resolve("index.json");
+            if (!Files.exists(indexFile)) {
+                Files.writeString(indexFile, "{\"schemaVersion\":2,\"manifests\":[]}", StandardCharsets.UTF_8);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException("Cannot initialize OCI layout", e);
+        }
+    }
+
+    /** True when the Content-Type or JSON mediaType field indicates an OCI/Docker image index. */
+    private boolean isIndexType(String contentType, String json) {
+        return isIndexMediaType(contentType) || isIndexMediaType(extractMediaType(json));
+    }
+
+    private boolean isIndexMediaType(String mediaType) {
+        if (mediaType == null) return false;
+        return mediaType.contains("image.index") || mediaType.contains("manifest.list");
+    }
+
+    /**
+     * Returns the correct Content-Type for a manifest or index JSON blob.
+     * Uses structural detection because the ORAS SDK serializes "manifests" before the top-level
+     * "mediaType" field, causing naive first-occurrence extraction to pick up a nested manifest type.
+     * OCI indexes have "manifests" but no top-level "config"; manifests have "config".
+     */
+    private String resolveContentType(String json) {
+        if (json.contains("\"manifests\"") && !json.contains("\"config\"")) {
+            return "application/vnd.oci.image.index.v1+json";
+        }
+        String mediaType = extractMediaType(json);
+        return mediaType.isEmpty() ? "application/vnd.oci.image.manifest.v1+json" : mediaType;
+    }
+
+    /**
+     * Extracts the mediaType field value from a manifest/index JSON string without a full parse.
+     * Returns an empty string if not found. NOTE: may match a nested occurrence when the top-level
+     * field appears after array elements — use resolveContentType() for response headers.
+     */
+    private String extractMediaType(String json) {
+        int idx = json.indexOf("\"mediaType\"");
+        if (idx < 0) return "";
+        int colon = json.indexOf(':', idx);
+        if (colon < 0) return "";
+        int start = json.indexOf('"', colon) + 1;
+        int end = json.indexOf('"', start);
+        return (start > 0 && end > start) ? json.substring(start, end).replace("\\/", "/") : "";
+    }
 
     private LayoutRef layoutRef(OCILayout ociLayout, String reference) {
         return reference.startsWith("sha256:")
